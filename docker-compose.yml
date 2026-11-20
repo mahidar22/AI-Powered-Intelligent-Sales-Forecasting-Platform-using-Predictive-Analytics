@@ -1,0 +1,94 @@
+# SalesGenie AI - PostgreSQL + backend API + Streamlit frontend.
+#
+# The stack was built and started on 27 October 2026 (Docker 29.7.2): all three
+# services report healthy, the API applies the Alembic migration to PostgreSQL,
+# and the frontend answers /_stcore/health. See
+# docs/qa/evidence/2026-10-27-docker-compose-verification.txt.
+#
+# Usage:
+#   copy .env.example .env    (then set POSTGRES_PASSWORD and JWT_SECRET)
+#   docker compose up --build
+#   curl http://127.0.0.1:8000/api/v1/health
+#   open http://127.0.0.1:8501
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: salesgenie
+      POSTGRES_USER: salesgenie
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - salesgenie_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesgenie -d salesgenie"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      # Set INSTALL_AI_EXTRAS=true to add the optional OpenAI/Gemini SDKs and
+      # LangGraph to the image for live model calls. The deterministic mock
+      # provider needs none of them.
+      args:
+        INSTALL_AI_EXTRAS: ${INSTALL_AI_EXTRAS:-false}
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://salesgenie:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/salesgenie
+      SALES_GENIE_ENV: ${SALES_GENIE_ENV:-production}
+      AUTH_ENABLED: "true"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8501,http://127.0.0.1:8501}
+      SALES_GENIE_AI_BACKEND: ${SALES_GENIE_AI_BACKEND:-external}
+      SALES_GENIE_LLM_PROVIDER: ${SALES_GENIE_LLM_PROVIDER:-auto}
+      SALES_GENIE_LLM_MODEL: ${SALES_GENIE_LLM_MODEL:-}
+      SALES_GENIE_LLM_TEMPERATURE: ${SALES_GENIE_LLM_TEMPERATURE:-0.2}
+      SALES_GENIE_AI_TIMEOUT_SECONDS: ${SALES_GENIE_AI_TIMEOUT_SECONDS:-20}
+      GROQ_API_KEY: ${SALES_GENIE_GROQ_API_KEY:-}
+      GROQ_BASE_URL: "${GROQ_BASE_URL:-https://api.groq.com/openai/v1}"
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    # Built and verified on 27 October 2026; see BUG-012 in docs/qa/bug-log.md.
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      # The UI talks to the API only. It never receives DB credentials or AI
+      # provider keys.
+      SALES_GENIE_BACKEND_BASE_URL: http://api:8000
+      SALES_GENIE_BACKEND_TOKEN: ${FRONTEND_BACKEND_TOKEN:-}
+      SALES_GENIE_BACKEND_EMAIL: ${FRONTEND_BACKEND_EMAIL:-}
+      SALES_GENIE_BACKEND_PASSWORD: ${FRONTEND_BACKEND_PASSWORD:-}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  salesgenie_pgdata:
